@@ -159,7 +159,12 @@ public class VerifyResponseHttpStatusCodeHandlingRfcCorrectnessComponentTest {
             .then()
                 .extract();
 
-            assertThat(response.statusCode()).isEqualTo(desiredStatusCode);
+            assertThat(response.statusCode())
+                .withFailMessage(
+                    "Expected status code response %s, but received %s. Full response payload: %s",
+                    desiredStatusCode, response.statusCode(), response.asString()
+                )
+                .isEqualTo(desiredStatusCode);
             if (isContentAlwaysEmptyStatusCode(desiredStatusCode)) {
                 assertThat(response.asString()).isNullOrEmpty();
                 assertThat(response.header(CONTENT_LENGTH)).isEqualTo("0");

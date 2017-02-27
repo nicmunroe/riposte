@@ -21,11 +21,11 @@
     <logger name="com.nike.wingtips.http.HttpRequestTracingUtils" level="INFO"/>
     <logger name="com.nike.riposte.server.handler.SecurityValidationHandler" level="INFO"/>
 
-    <logger name="ACCESS_LOG" level="INFO" additivity="false">
+    <logger name="ACCESS_LOG" level="OFF" additivity="false">
         <appender-ref ref="ACCESS_LOG_APPENDER" />
     </logger>
 
-    <root level="debug">
+    <root level="warn">
         <appender-ref ref="STDOUT" />
     </root>
 </configuration>

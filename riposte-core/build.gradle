@@ -30,3 +30,11 @@ dependencies {
             "commons-io:commons-io:$apacheCommonsIoVersion",
     )
 }
+
+test {
+    testLogging {
+        exceptionFormat "FULL"
+        events "passed", "skipped", "failed", "standardError"
+        displayGranularity = 0
+    }
+}
