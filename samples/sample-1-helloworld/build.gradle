@@ -3,6 +3,7 @@ evaluationDependsOn(':')
 dependencies {
     compile(
             project(":riposte-core"),
+            project(":riposte-metrics-codahale-signalfx"),
             "ch.qos.logback:logback-classic:$logbackVersion",
             "ch.qos.logback:logback-core:$logbackVersion"
     )
