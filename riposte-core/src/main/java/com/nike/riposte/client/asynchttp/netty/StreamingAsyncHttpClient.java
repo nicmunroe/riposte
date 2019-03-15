@@ -42,7 +42,9 @@ import java.util.concurrent.ThreadFactory;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
+import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManagerFactory;
 
 import io.netty.bootstrap.Bootstrap;
@@ -88,6 +90,7 @@ import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
@@ -810,7 +813,7 @@ public class StreamingAsyncHttpClient {
                         lastChunkSentDownstreamHolder.heldObject = false;
                         //noinspection ConstantConditions
                         prepChannelForDownstreamCall(
-                            pool, ch, callback, distributedSpanStackToUse, mdcContextToUse, isSecureHttpsCall,
+                            downstreamHost, downstreamPort, pool, ch, callback, distributedSpanStackToUse, mdcContextToUse, isSecureHttpsCall,
                             relaxedHttpsValidation, performSubSpanAroundDownstreamCalls, downstreamCallTimeoutMillis,
                             callActiveHolder, lastChunkSentDownstreamHolder, proxyRouterProcessingState,
                             spanForDownstreamCall
@@ -892,11 +895,21 @@ public class StreamingAsyncHttpClient {
     }
 
     protected void prepChannelForDownstreamCall(
-        ChannelPool pool, Channel ch, StreamingCallback callback, Deque<Span> distributedSpanStackToUse,
-        Map<String, String> mdcContextToUse, boolean isSecureHttpsCall, boolean relaxedHttpsValidation,
-        boolean performSubSpanAroundDownstreamCalls, long downstreamCallTimeoutMillis,
-        ObjectHolder<Boolean> callActiveHolder, ObjectHolder<Boolean> lastChunkSentDownstreamHolder,
-        ProxyRouterProcessingState proxyRouterProcessingState, @Nullable Span spanForDownstreamCall
+        String downstreamHost,
+        int downstreamPort,
+        ChannelPool pool,
+        Channel ch,
+        StreamingCallback callback,
+        Deque<Span> distributedSpanStackToUse,
+        Map<String, String> mdcContextToUse,
+        boolean isSecureHttpsCall,
+        boolean relaxedHttpsValidation,
+        boolean performSubSpanAroundDownstreamCalls,
+        long downstreamCallTimeoutMillis,
+        ObjectHolder<Boolean> callActiveHolder,
+        ObjectHolder<Boolean> lastChunkSentDownstreamHolder,
+        ProxyRouterProcessingState proxyRouterProcessingState,
+        @Nullable Span spanForDownstreamCall
     ) throws SSLException, NoSuchAlgorithmException, KeyStoreException {
 
         ChannelHandler chunkSenderHandler = new SimpleChannelInboundHandler<HttpObject>() {
@@ -1138,29 +1151,33 @@ public class StreamingAsyncHttpClient {
             DOWNSTREAM_CALL_TIMEOUT_HANDLER_NAME, p, registeredHandlerNames
         );
 
-        if (isSecureHttpsCall) {
-            // SSL call. Make sure we add the SSL handler if necessary.
-            if (!registeredHandlerNames.contains(SSL_HANDLER_NAME)) {
-                if (clientSslCtx == null) {
-                    if (relaxedHttpsValidation) {
-                        clientSslCtx =
-                            SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
-                    }
-                    else {
-                        TrustManagerFactory tmf =
-                            TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                        tmf.init((KeyStore) null);
-                        clientSslCtx = SslContextBuilder.forClient().trustManager(tmf).build();
-                    }
-                }
-
-                p.addAfter(DOWNSTREAM_CALL_TIMEOUT_HANDLER_NAME, SSL_HANDLER_NAME, clientSslCtx.newHandler(ch.alloc()));
-            }
+        // Whether this is a secure call or not, we want to remove any previously-existing SSL handler (SSL handlers
+        //      can't be reused when we're including the host/port, which is required for some cert types).
+        if (registeredHandlerNames.contains(SSL_HANDLER_NAME)) {
+            p.remove(SSL_HANDLER_NAME);
         }
-        else {
-            // Not an SSL call. Remove the SSL handler if it's there.
-            if (registeredHandlerNames.contains(SSL_HANDLER_NAME))
-                p.remove(SSL_HANDLER_NAME);
+
+        if (isSecureHttpsCall) {
+            // SSL call. Make sure we add the SSL handler with the correct host/port.
+            if (clientSslCtx == null) {
+                if (relaxedHttpsValidation) {
+                    clientSslCtx =
+                        SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
+                }
+                else {
+                    TrustManagerFactory tmf =
+                        TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                    tmf.init((KeyStore) null);
+                    clientSslCtx = SslContextBuilder.forClient().trustManager(tmf).build();
+                }
+            }
+
+            SslHandler sslHandler = clientSslCtx.newHandler(ch.alloc(), downstreamHost, downstreamPort);
+            SSLEngine sslEngine = sslHandler.engine();
+            SSLParameters sslParameters = sslEngine.getSSLParameters();
+            sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
+            sslEngine.setSSLParameters(sslParameters);
+            p.addAfter(DOWNSTREAM_CALL_TIMEOUT_HANDLER_NAME, SSL_HANDLER_NAME, sslHandler);
         }
 
         // The HttpClientCodec handler deals with HTTP codec stuff so you don't have to. Set it up if it hasn't already
