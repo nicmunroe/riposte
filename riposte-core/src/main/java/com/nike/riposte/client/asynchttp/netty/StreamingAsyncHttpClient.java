@@ -36,6 +36,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadFactory;
@@ -129,6 +130,7 @@ public class StreamingAsyncHttpClient {
     private static final Logger logger = LoggerFactory.getLogger(StreamingAsyncHttpClient.class);
     private volatile ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
     private SslContext clientSslCtx;
+    private SslContext insecureSslCtx;
     private final boolean debugChannelLifecycleLoggingEnabled;
     private final long idleChannelTimeoutMillis;
     private final int downstreamConnectionTimeoutMillis;
@@ -1151,33 +1153,68 @@ public class StreamingAsyncHttpClient {
             DOWNSTREAM_CALL_TIMEOUT_HANDLER_NAME, p, registeredHandlerNames
         );
 
-        // Whether this is a secure call or not, we want to remove any previously-existing SSL handler (SSL handlers
-        //      can't be reused when we're including the host/port, which is required for some cert types).
-        if (registeredHandlerNames.contains(SSL_HANDLER_NAME)) {
-            p.remove(SSL_HANDLER_NAME);
-        }
-
         if (isSecureHttpsCall) {
-            // SSL call. Make sure we add the SSL handler with the correct host/port.
-            if (clientSslCtx == null) {
-                if (relaxedHttpsValidation) {
-                    clientSslCtx =
-                        SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
+            // Check and see if there's already an existing SslHandler in the pipeline. If it's pointed at the same
+            //      host/port we need for this call, then we can leave it alone and don't need to create a new one.
+            boolean requiresNewSslHandler = true;
+            if (registeredHandlerNames.contains(SSL_HANDLER_NAME)) {
+                SslHandler existingSslHandler = (SslHandler) p.get(SSL_HANDLER_NAME);
+                SSLEngine existingSslEngine = existingSslHandler.engine();
+                if (Objects.equals(downstreamHost, existingSslEngine.getPeerHost())
+                    && Objects.equals(downstreamPort, existingSslEngine.getPeerPort())
+                ) {
+                    // The existing SslHandler's SslEngine is pointed at the correct host/port. We don't need to
+                    //      add a new one.
+                    logger.error("NO NEW HANDLER - FOUND ENGINE WITH MATCHING HOST/PORT");
+                    requiresNewSslHandler = false;
                 }
                 else {
-                    TrustManagerFactory tmf =
-                        TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                    tmf.init((KeyStore) null);
-                    clientSslCtx = SslContextBuilder.forClient().trustManager(tmf).build();
+                    // The existing SslHandler's SslEngine is *not* pointed at the correct host/port. We need a new one,
+                    //      so remove the old one.
+                    p.remove(SSL_HANDLER_NAME);
                 }
             }
 
-            SslHandler sslHandler = clientSslCtx.newHandler(ch.alloc(), downstreamHost, downstreamPort);
-            SSLEngine sslEngine = sslHandler.engine();
-            SSLParameters sslParameters = sslEngine.getSSLParameters();
-            sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
-            sslEngine.setSSLParameters(sslParameters);
-            p.addAfter(DOWNSTREAM_CALL_TIMEOUT_HANDLER_NAME, SSL_HANDLER_NAME, sslHandler);
+            if (requiresNewSslHandler) {
+                // SSL call and we need to add a SslHandler. Create the general-purpose reusable SslContexts if needed.
+                if (clientSslCtx == null) {
+                    TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                        TrustManagerFactory.getDefaultAlgorithm()
+                    );
+                    tmf.init((KeyStore) null);
+
+                    clientSslCtx = SslContextBuilder
+                        .forClient()
+                        .trustManager(tmf)
+                        .build();
+                }
+
+                if (insecureSslCtx == null) {
+                    insecureSslCtx = SslContextBuilder
+                        .forClient()
+                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                        .build();
+                }
+
+                // Figure out which SslContext to use for this call.
+                SslContext sslCtxToUse = (relaxedHttpsValidation) ? insecureSslCtx : clientSslCtx;
+
+                // Create the SslHandler and configure the SslEngine
+                //      as per the javadocs for SslContext.newHandler(ByteBufAllocator, String, int).
+                SslHandler sslHandler = sslCtxToUse.newHandler(ch.alloc(), downstreamHost, downstreamPort);
+                SSLEngine sslEngine = sslHandler.engine();
+                SSLParameters sslParameters = sslEngine.getSSLParameters();
+                sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
+                sslEngine.setSSLParameters(sslParameters);
+                // Add the SslHandler to the pipeline in the correct location.
+                p.addAfter(DOWNSTREAM_CALL_TIMEOUT_HANDLER_NAME, SSL_HANDLER_NAME, sslHandler);
+            }
+        }
+        else {
+            // Not an SSL call. Remove the SSL handler if it's there.
+            if (registeredHandlerNames.contains(SSL_HANDLER_NAME)) {
+                p.remove(SSL_HANDLER_NAME);
+            }
         }
 
         // The HttpClientCodec handler deals with HTTP codec stuff so you don't have to. Set it up if it hasn't already
